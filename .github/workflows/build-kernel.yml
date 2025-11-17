@@ -1,4 +1,4 @@
-name: Build MikaKernel (OnePlus 12R)
+name: Build MikaKernel (OnePlus 12R) - LTO Disabled
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ jobs:
             device-tree-compiler python3 wget curl git ccache \
             lzop zip unzip zlib1g-dev liblz4-tool pkg-config
 
-      - name: Pull small prebuilt GCC toolchains (for CROSS_COMPILE helpers)
+      - name: Pull small prebuilt GCC toolchains (helpers)
         run: |
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 aarch64-linux-android-4.9
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 arm-linux-androideabi-4.9
@@ -33,26 +33,21 @@ jobs:
           cd ..
           chmod -R +x toolchains/clang/bin || true
 
-      - name: Clone kernel source and modules (exact repos you gave)
+      - name: Clone kernel source and modules (exact repos you provided)
         run: |
           mkdir -p kernel/oneplus
           cd kernel/oneplus
 
-          # Your kernel source (exact)
           git clone https://github.com/gaurav-paul9/android_kernel_oneplus_sm8550.git -b lineage-23.0 sm8550 --depth=1
-
-          # Modules/devicetree tree (exact)
           git clone https://github.com/LineageOS/android_kernel_oneplus_sm8550-modules.git -b lineage-23.0 sm8550-modules --depth=1
 
-          # show layout for logs
           echo "=== kernel tree listing ==="
           ls -la sm8550 || true
           echo "=== modules tree listing ==="
           ls -la sm8550-modules || true
 
-      - name: Build kernel (use defconfig chain from screenshot)
+      - name: Build kernel (disable LTO)
         env:
-          # no funky runner expressions; set what we need explicitly
           CLANG_DIR: ${{ github.workspace }}/toolchains/clang
         run: |
           set -euo pipefail
@@ -66,7 +61,7 @@ jobs:
           # toolchain into PATH
           export PATH="$GITHUB_WORKSPACE/toolchains/clang/bin:$PATH"
 
-          # required env for clang builds
+          # clang build env
           export ARCH=arm64
           export SUBARCH=arm64
           export CC=clang
@@ -82,20 +77,27 @@ jobs:
           mkdir -p "$OUTDIR"
           cd "$KERNEL_SRC"
 
-          # keep tree clean so olddefconfig will succeed
+          # ensure clean tree
           make mrproper || true
 
           echo "=== APPLYING DEFCONFIG CHAIN ==="
-          # generate base gki_defconfig and merge vendor fragments exactly as in your screenshot
           make O="$OUTDIR" gki_defconfig
           make O="$OUTDIR" vendor/kalama_GKI.config
           make O="$OUTDIR" vendor/oplus/kalama_GKI.config
           make O="$OUTDIR" vendor/debugfs.config
 
+          echo "=== DISABLING LTO IN .config ==="
+          # disable all LTO options and enable LTO_NONE
+          scripts/config --file $OUTDIR/.config \
+            -d LTO_CLANG -d LTO_CLANG_FULL -d LTO_CLANG_THIN -e LTO_NONE || true
+
+          # also disable KUNIT/KUNIT configs if needed (optional, safe)
+          # scripts/config --file $OUTDIR/.config -d KUNIT -d KUNIT_DEBUGFS || true
+
           echo "=== FINALIZING CONFIG ==="
           make O="$OUTDIR" olddefconfig
 
-          echo "=== BUILDING KERNEL ==="
+          echo "=== BUILDING KERNEL (LTO disabled) ==="
           make -j"$THREADS" O="$OUTDIR"
 
           echo "=== BUILD OUTPUT LISTING ==="
