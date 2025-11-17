@@ -6,78 +6,87 @@ on:
 jobs:
   build-kernel:
     runs-on: ubuntu-latest
-    env:
-      # parallel build factor
-      MAKE_JOBS: ${{ runner.os == 'Linux' && (format('{0}', (github.runner.workspace && '') ) || '') }}
+
     steps:
       - name: Checkout workflow repo
         uses: actions/checkout@v4
 
-      - name: Install build deps
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison flex build-essential \
-            libssl-dev libelf-dev device-tree-compiler dwarves \
-            python3 wget curl git ccache
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex build-essential \
+            libssl-dev libelf-dev dwarves \
+            device-tree-compiler python3 wget curl git ccache \
+            lzop zip unzip zlib1g-dev liblz4-tool pkg-config
 
-      - name: Pull toolchains (GCC 4.9 prebuilt used for CROSS_COMPILE helpers)
+      - name: Pull small prebuilt GCC toolchains (for CROSS_COMPILE helpers)
         run: |
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 aarch64-linux-android-4.9
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 arm-linux-androideabi-4.9
 
-      - name: Pull Alphadroid Clang (r547379)
+      - name: Pull Alphadroid Clang r547379
         run: |
           mkdir -p toolchains
           cd toolchains
           git clone --depth=1 https://gitlab.com/alphadroid-project/prebuilts_clang_host_linux-x86_clang-r547379.git clang
-          chmod -R +x clang/bin || true
           cd ..
+          chmod -R +x toolchains/clang/bin || true
 
-      - name: Clone kernel source and modules (use exactly your repos)
+      - name: Clone kernel source and modules (exact repos you gave)
         run: |
           mkdir -p kernel/oneplus
           cd kernel/oneplus
 
-          # kernel source (your repo)
+          # Your kernel source (exact)
           git clone https://github.com/gaurav-paul9/android_kernel_oneplus_sm8550.git -b lineage-23.0 sm8550 --depth=1
 
-          # kernel modules (modules/devicetree tree)
+          # Modules/devicetree tree (exact)
           git clone https://github.com/LineageOS/android_kernel_oneplus_sm8550-modules.git -b lineage-23.0 sm8550-modules --depth=1
 
-          # show the expected symlink layout (for debugging)
-          ls -la ./sm8550 || true
-          ls -la ./sm8550-modules || true
-          # ensure symlinks inside kernel source resolve to modules tree
-          # (we rely on the repo's symlinks; do not change them)
+          # show layout for logs
+          echo "=== kernel tree listing ==="
+          ls -la sm8550 || true
+          echo "=== modules tree listing ==="
+          ls -la sm8550-modules || true
 
-      - name: Build kernel (use defconfig chain you provided)
+      - name: Build kernel (use defconfig chain from screenshot)
+        env:
+          # no funky runner expressions; set what we need explicitly
+          CLANG_DIR: ${{ github.workspace }}/toolchains/clang
         run: |
           set -euo pipefail
-          # locations
-          WORKDIR="$GITHUB_WORKSPACE/kernel/oneplus/sm8550"
-          OUTDIR="$WORKDIR/out"
-          CLANGDIR="$GITHUB_WORKSPACE/toolchains/clang"
-          EXPORT_PATH="$CLANGDIR/bin:$PATH"
 
-          export PATH="$EXPORT_PATH"
+          # paths
+          WORKROOT="$GITHUB_WORKSPACE/kernel/oneplus"
+          KERNEL_SRC="$WORKROOT/sm8550"
+          OUTDIR="$KERNEL_SRC/out"
+          THREADS=$(nproc --all)
+
+          # toolchain into PATH
+          export PATH="$GITHUB_WORKSPACE/toolchains/clang/bin:$PATH"
+
+          # required env for clang builds
           export ARCH=arm64
           export SUBARCH=arm64
           export CC=clang
           export CXX=clang++
           export LLVM=1
           export LLVM_IAS=1
-          # Keep CROSS_COMPILE pointing to prebuilt GCC 4.9 for proper linking helpers
+
+          # CROSS_COMPILE helpers (prebuilt GCC 4.9)
           export CROSS_COMPILE="$GITHUB_WORKSPACE/aarch64-linux-android-4.9/bin/aarch64-linux-android-"
           export CROSS_COMPILE_ARM32="$GITHUB_WORKSPACE/arm-linux-androideabi-4.9/bin/arm-linux-androideabi-"
 
-          # create OUT and build
+          echo "WORKDIR: $KERNEL_SRC"
           mkdir -p "$OUTDIR"
-          cd "$WORKDIR"
+          cd "$KERNEL_SRC"
 
-          # ensure clean tree so 'make olddefconfig' doesn't complain
+          # keep tree clean so olddefconfig will succeed
           make mrproper || true
 
           echo "=== APPLYING DEFCONFIG CHAIN ==="
+          # generate base gki_defconfig and merge vendor fragments exactly as in your screenshot
           make O="$OUTDIR" gki_defconfig
           make O="$OUTDIR" vendor/kalama_GKI.config
           make O="$OUTDIR" vendor/oplus/kalama_GKI.config
@@ -87,12 +96,15 @@ jobs:
           make O="$OUTDIR" olddefconfig
 
           echo "=== BUILDING KERNEL ==="
-          JOBS=$(nproc --all)
-          make -j"$JOBS" O="$OUTDIR"
+          make -j"$THREADS" O="$OUTDIR"
+
+          echo "=== BUILD OUTPUT LISTING ==="
+          ls -la "$OUTDIR/arch/arm64/boot" || true
 
       - name: Package kernel into AnyKernel3
         run: |
-          cd $GITHUB_WORKSPACE
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
           git clone --depth=1 https://github.com/Kernel-SU/AnyKernel3 AnyKernel3 || true
           rm -rf AnyKernel3/.git AnyKernel3/.github AnyKernel3/LICENSE AnyKernel3/README.md || true
 
@@ -108,10 +120,9 @@ jobs:
           elif [ -f "${OUT}/arch/arm64/boot/Image" ]; then
             cp "${OUT}/arch/arm64/boot/Image" AnyKernel3/
           else
-            echo "No boot Image found in ${OUT}/arch/arm64/boot/"; ls -la "${OUT}/arch/arm64/boot" || true; exit 1
+            echo "ERROR: No kernel Image found in ${OUT}/arch/arm64/boot/"; ls -la "${OUT}/arch/arm64/boot" || true; exit 1
           fi
 
-          # dtbo if present
           if [ -f "${OUT}/arch/arm64/boot/dtbo.img" ]; then
             cp "${OUT}/arch/arm64/boot/dtbo.img" AnyKernel3/
           fi
