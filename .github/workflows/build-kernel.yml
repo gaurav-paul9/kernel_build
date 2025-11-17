@@ -13,43 +13,60 @@ jobs:
         run: |
           echo "ANYKERNEL_SOURCE=$(cat config.env | grep -w "ANYKERNEL_SOURCE" | head -n 1 | cut -d "=" -f 2)" >> $GITHUB_ENV
           echo "ANYKERNEL_SOURCE_BRANCH=$(cat config.env | grep -w "ANYKERNEL_SOURCE_BRANCH" | head -n 1 | cut -d "=" -f 2)" >> $GITHUB_ENV
-          echo "KERNEL_SOURCE=https://github.com/gaurav-paul9/android_kernel_oneplus_sm8550" >> $GITHUB_ENV
-          echo "KERNEL_SOURCE_BRANCH=lineage-23.0" >> $GITHUB_ENV
-          echo "KERNEL_CONFIG=$(cat config.env | grep -w "KERNEL_CONFIG" | head -n 1 | cut -d "=" -f 2)" >> $GITHUB_ENV
+          echo "KERNEL_SOURCE=https://github.com/OnePlusOSS/android_kernel_common_oneplus_sm8550" >> $GITHUB_ENV
+          echo "KERNEL_SOURCE_BRANCH=oneplus/sm8550_u_14.0.0_12R" >> $GITHUB_ENV
+          echo "KERNEL_MODULES=https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8550" >> $GITHUB_ENV
+          echo "KERNEL_CONFIG=gki_defconfig" >> $GITHUB_ENV
           echo "BUILD_ARGS=$(cat config.env | grep -w "BUILD_ARGS" | head -n 1 | cut -d ":" -f 2)" >> $GITHUB_ENV
 
       - name: Pull toolchain
         run: |
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 aarch64-linux-android-4.9
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 arm-linux-androideabi-4.9
-          mkdir clang && curl https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-dev/clang-r487747c.tar.gz -RLO && tar -C clang/ -xf clang-*.tar.gz
 
-      - name: Pull kernel source
+          # Alphadroid Clang r547379
+          git clone --depth=1 https://gitlab.com/alphadroid-project/prebuilts_clang_host_linux-x86_clang-r547379 clang
+
+      - name: Pull kernel source + modules
         run: |
           git clone --depth=1 ${{ env.KERNEL_SOURCE }} -b ${{ env.KERNEL_SOURCE_BRANCH }} kernel-source
+          git clone --depth=1 ${{ env.KERNEL_MODULES }} modules
 
-          # pull module tree also (your earlier request)
-          git clone --depth=1 https://github.com/LineageOS/android_kernel_oneplus_sm8550-modules \
-            -b lineage-23.0 kernel-source/sm8550-modules
+          # Place modules correctly under kernel tree  
+          mv modules/* kernel-source/
 
       - name: Build kernel
         run: |
           export KBUILD_BUILD_USER="zclkkk"
           export KBUILD_BUILD_HOST="workspace"
-          export PATH=$GITHUB_WORKSPACE/clang/bin:${PATH}
-          args="                  ARCH=arm64 \
-                                  O=../out \
-                                  ${{ env.BUILD_ARGS }} \
-                                  CLANG_TRIPLE=aarch64-linux-gnu- \
-                                  CROSS_COMPILE=$GITHUB_WORKSPACE/aarch64-linux-android-4.9/bin/aarch64-linux-android- \
-                                  CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/arm-linux-androideabi-4.9/bin/arm-linux-androideabi- "
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+
+          args="ARCH=arm64 \
+                O=../out \
+                ${{ env.BUILD_ARGS }} \
+                CLANG_TRIPLE=aarch64-linux-gnu- \
+                CROSS_COMPILE=$GITHUB_WORKSPACE/aarch64-linux-android-4.9/bin/aarch64-linux-android- \
+                CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/arm-linux-androideabi-4.9/bin/arm-linux-androideabi-"
+
           cd kernel-source
-          make ${args} ${{ env.KERNEL_CONFIG }}
+
+          echo "=== APPLYING DEFCONFIG CHAIN ==="
+          make ${args} gki_defconfig
+          make ${args} vendor/kalama_GKI.config
+          make ${args} vendor/oplus/kalama_GKI.config
+          make ${args} vendor/debugfs.config
+
+          echo "=== FINALIZING CONFIG ==="
+          make ${args} olddefconfig
+
+          echo "=== BUILDING KERNEL ==="
           make -j$(($(getconf _NPROCESSORS_ONLN) * 2)) ${args}
 
       - name: Package kernel
         run: |
-          git clone --depth=1 ${{ env.ANYKERNEL_SOURCE }} -b ${{ env.ANYKERNEL_SOURCE_BRANCH }} AnyKernel3 && rm -rf AnyKernel3/.git AnyKernel3/.github AnyKernel3/LICENSE AnyKernel3/README.md
+          git clone --depth=1 ${{ env.ANYKERNEL_SOURCE }} -b ${{ env.ANYKERNEL_SOURCE_BRANCH }} AnyKernel3
+          rm -rf AnyKernel3/.git AnyKernel3/.github AnyKernel3/LICENSE AnyKernel3/README.md
+
           if [[ -f out/arch/arm64/boot/Image.gz-dtb ]]; then
             cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
           elif [[ -f out/arch/arm64/boot/Image-dtb ]]; then
@@ -59,6 +76,7 @@ jobs:
           elif [[ -f out/arch/arm64/boot/Image ]]; then
             cp out/arch/arm64/boot/Image AnyKernel3/Image
           fi
+
           if [ -f out/arch/arm64/boot/dtbo.img ]; then
             cp out/arch/arm64/boot/dtbo.img AnyKernel3/dtbo.img
           fi
