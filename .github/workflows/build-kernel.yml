@@ -37,23 +37,21 @@ jobs:
       run: |
         cd toolchains
         git clone https://gitlab.com/alphadroid-project/prebuilts_clang_host_linux-x86_clang-r547379.git clang --depth=1
-        cd clang
-        chmod +x bin/clang
+        chmod +x clang/bin/clang
 
     - name: Export environment vars
       run: |
         echo "CLANG_PATH=$GITHUB_WORKSPACE/toolchains/clang/bin" >> $GITHUB_ENV
         echo "KERNEL_SRC=$GITHUB_WORKSPACE/kernel/oneplus/sm8550" >> $GITHUB_ENV
-        echo "MODULES_SRC=$GITHUB_WORKSPACE/kernel/oneplus/sm8550-modules" >> $GITHUB_ENV
         echo "OUT_DIR=$GITHUB_WORKSPACE/out" >> $GITHUB_ENV
 
     - name: Prepare OUT directory
       run: mkdir -p out
 
-    - name: Generate defconfig (your defconfig chain)
-      env:
-        PATH: ${{ env.CLANG_PATH }}:${{ env.PATH }}
+    - name: Generate defconfig
       run: |
+        export PATH="$CLANG_PATH:$PATH"
+
         cd $KERNEL_SRC
 
         export ARCH=arm64
@@ -65,7 +63,6 @@ jobs:
 
         make O=$OUT_DIR gki_defconfig
 
-        # merge vendor configs
         bash scripts/kconfig/merge_config.sh -m \
           $OUT_DIR/.config \
           arch/arm64/configs/vendor/kalama_GKI.config \
@@ -75,9 +72,9 @@ jobs:
         make O=$OUT_DIR olddefconfig
 
     - name: Build kernel
-      env:
-        PATH: ${{ env.CLANG_PATH }}:${{ env.PATH }}
       run: |
+        export PATH="$CLANG_PATH:$PATH"
+
         cd $KERNEL_SRC
 
         export ARCH=arm64
