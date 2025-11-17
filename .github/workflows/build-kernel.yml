@@ -1,166 +1,111 @@
-name: Build MikaKernel (OnePlus 12R) — LTO Disabled + frame-warning fix
+name: Build Kernel
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-kernel:
+  build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout workflow repo
-        uses: actions/checkout@v4
+    - name: Checkout repo
+      uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            bc bison flex build-essential \
-            libssl-dev libelf-dev dwarves \
-            device-tree-compiler python3 wget curl git ccache \
-            lzop zip unzip zlib1g-dev liblz4-tool pkg-config
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          git flex bison libssl-dev bc build-essential \
+          libc6-dev libncurses-dev libelf-dev dwarves ccache
 
-      - name: Pull helper prebuilt GCC toolchains (small)
-        run: |
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 aarch64-linux-android-4.9
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 arm-linux-androideabi-4.9
+    - name: Create workspace structure
+      run: |
+        mkdir -p kernel/oneplus
+        mkdir -p toolchains
 
-      - name: Pull AlphaDroid Clang r547379 (prebuilt)
-        run: |
-          mkdir -p toolchains
-          cd toolchains
-          git clone --depth=1 https://gitlab.com/alphadroid-project/prebuilts_clang_host_linux-x86_clang-r547379.git clang
-          cd ..
-          chmod -R +x toolchains/clang/bin || true
+    - name: Clone kernel source (your repo)
+      run: |
+        git clone https://github.com/gaurav-paul9/android_kernel_oneplus_sm8550.git \
+          -b lineage-23.0 kernel/oneplus/sm8550 --depth=1
 
-      - name: Clone kernel source and modules (use your repos)
-        run: |
-          mkdir -p kernel/oneplus
-          cd kernel/oneplus
+    - name: Clone kernel modules repo
+      run: |
+        git clone https://github.com/LineageOS/android_kernel_oneplus_sm8550-modules.git \
+          -b lineage-23.0 kernel/oneplus/sm8550-modules --depth=1
 
-          # kernel source (your repo)
-          git clone https://github.com/gaurav-paul9/android_kernel_oneplus_sm8550.git -b lineage-23.0 sm8550 --depth=1
+    - name: Clone Alphadroid Clang r547379
+      run: |
+        cd toolchains
+        git clone https://gitlab.com/alphadroid-project/prebuilts_clang_host_linux-x86_clang-r547379.git clang --depth=1
+        cd clang
+        chmod +x bin/clang
 
-          # modules & devicetree repo
-          git clone https://github.com/LineageOS/android_kernel_oneplus_sm8550-modules.git -b lineage-23.0 sm8550-modules --depth=1
+    - name: Export environment vars
+      run: |
+        echo "CLANG_PATH=$GITHUB_WORKSPACE/toolchains/clang/bin" >> $GITHUB_ENV
+        echo "KERNEL_SRC=$GITHUB_WORKSPACE/kernel/oneplus/sm8550" >> $GITHUB_ENV
+        echo "MODULES_SRC=$GITHUB_WORKSPACE/kernel/oneplus/sm8550-modules" >> $GITHUB_ENV
+        echo "OUT_DIR=$GITHUB_WORKSPACE/out" >> $GITHUB_ENV
 
-          echo "=== kernel tree listing ==="
-          ls -la sm8550 || true
-          echo "=== modules tree listing ==="
-          ls -la sm8550-modules || true
+    - name: Prepare OUT directory
+      run: mkdir -p out
 
-      - name: Prepare environment (export PATH etc.)
-        run: |
-          echo "Add clang to PATH"
-          echo "$GITHUB_WORKSPACE/toolchains/clang/bin" >> $GITHUB_ENV
-          echo "KERNEL_ROOT=$GITHUB_WORKSPACE/kernel/oneplus/sm8550" >> $GITHUB_ENV
-          echo "MODULES_ROOT=$GITHUB_WORKSPACE/kernel/oneplus/sm8550-modules" >> $GITHUB_ENV
+    - name: Generate defconfig (your defconfig chain)
+      env:
+        PATH: ${{ env.CLANG_PATH }}:${{ env.PATH }}
+      run: |
+        cd $KERNEL_SRC
 
-      - name: Build kernel + external modules (LTO disabled, frame-size warnings allowed)
-        env:
-          PATH: ${{ github.workspace }}/toolchains/clang/bin:${PATH}
-        run: |
-          set -euo pipefail
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export CC=clang
+        export LLVM=1
+        export LLVM_IAS=1
+        export CLANG_TRIPLE=aarch64-linux-gnu-
 
-          WORKROOT="$GITHUB_WORKSPACE/kernel/oneplus"
-          KERNEL_SRC="$WORKROOT/sm8550"
-          MODULES_SRC="$WORKROOT/sm8550-modules"
-          OUTDIR="$KERNEL_SRC/out"
-          THREADS=$(nproc --all)
+        make O=$OUT_DIR gki_defconfig
 
-          # Put clang into PATH
-          export PATH="$GITHUB_WORKSPACE/toolchains/clang/bin:$PATH"
+        # merge vendor configs
+        bash scripts/kconfig/merge_config.sh -m \
+          $OUT_DIR/.config \
+          arch/arm64/configs/vendor/kalama_GKI.config \
+          arch/arm64/configs/vendor/oplus/kalama_GKI.config \
+          arch/arm64/configs/vendor/debugfs.config
 
-          # clang build env
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export CC=clang
-          export CXX=clang++
-          export LLVM=1
-          export LLVM_IAS=1
+        make O=$OUT_DIR olddefconfig
 
-          # CROSS_COMPILE helpers (prebuilt GCC 4.9)
-          export CROSS_COMPILE="$GITHUB_WORKSPACE/aarch64-linux-android-4.9/bin/aarch64-linux-android-"
-          export CROSS_COMPILE_ARM32="$GITHUB_WORKSPACE/arm-linux-androideabi-4.9/bin/arm-linux-androideabi-"
+    - name: Build kernel
+      env:
+        PATH: ${{ env.CLANG_PATH }}:${{ env.PATH }}
+      run: |
+        cd $KERNEL_SRC
 
-          # ---------------------------
-          # IMPORTANT: avoid -Werror on large frame sizes
-          # Make the specific warning not an error so build continues.
-          # You can change this later to a per-file Makefile patch for cleanliness.
-          # ---------------------------
-          export KCFLAGS="-Wno-error=frame-larger-than"
-          echo "KCFLAGS set to: $KCFLAGS"
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export CC=clang
+        export LLVM=1
+        export LLVM_IAS=1
+        export CLANG_TRIPLE=aarch64-linux-gnu-
 
-          echo "WORKDIR: $KERNEL_SRC"
-          mkdir -p "$OUTDIR"
-          cd "$KERNEL_SRC"
+        make -j$(nproc --all) O=$OUT_DIR
 
-          # Keep tree clean so olddefconfig succeeds
-          make mrproper || true
+    - name: Package AnyKernel3
+      run: |
+        git clone https://github.com/Kernel-SU/AnyKernel3 --depth=1 AnyKernel3
+        rm -rf AnyKernel3/.git AnyKernel3/.github
 
-          echo "=== APPLYING DEFCONFIG CHAIN ==="
-          make O="$OUTDIR" gki_defconfig
-          make O="$OUTDIR" vendor/kalama_GKI.config
-          make O="$OUTDIR" vendor/oplus/kalama_GKI.config
-          make O="$OUTDIR" vendor/debugfs.config
+        if [[ -f out/arch/arm64/boot/Image.gz-dtb ]]; then
+          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+        elif [[ -f out/arch/arm64/boot/Image ]]; then
+          cp out/arch/arm64/boot/Image AnyKernel3/
+        fi
 
-          echo "=== DISABLING LTO IN .config ==="
-          scripts/config --file "$OUTDIR/.config" \
-            -d LTO_CLANG -d LTO_CLANG_FULL -d LTO_CLANG_THIN -e LTO_NONE || true
+        if [[ -f out/arch/arm64/boot/dtbo.img ]]; then
+          cp out/arch/arm64/boot/dtbo.img AnyKernel3/
+        fi
 
-          echo "=== FINALIZING CONFIG ==="
-          make O="$OUTDIR" olddefconfig
-
-          echo "=== BUILD: kernel + external modules (KBUILD_EXTMOD) ==="
-          # If you want verbose output, add V=1 to the make command below
-          make -j"$THREADS" O="$OUTDIR" KBUILD_EXTMOD="$MODULES_SRC"
-
-          echo "=== BUILD FINISHED (if no errors) ==="
-          ls -la "$OUTDIR/arch/arm64/boot" || true
-          ls -la "$OUTDIR/lib/modules" || true
-
-      - name: Package kernel into AnyKernel3 and zip
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE"
-          git clone --depth=1 https://github.com/Kernel-SU/AnyKernel3 AnyKernel3 || true
-          rm -rf AnyKernel3/.git AnyKernel3/.github AnyKernel3/LICENSE AnyKernel3/README.md || true
-
-          OUT="$GITHUB_WORKSPACE/kernel/oneplus/sm8550/out"
-
-          if [ -f "${OUT}/arch/arm64/boot/Image.gz-dtb" ]; then
-            cp "${OUT}/arch/arm64/boot/Image.gz-dtb" AnyKernel3/Image.gz-dtb
-          elif [ -f "${OUT}/arch/arm64/boot/Image-dtb" ]; then
-            cp "${OUT}/arch/arm64/boot/Image-dtb" AnyKernel3/Image-dtb
-          elif [ -f "${OUT}/arch/arm64/boot/Image.gz" ]; then
-            cp "${OUT}/arch/arm64/boot/Image.gz" AnyKernel3/Image.gz
-          elif [ -f "${OUT}/arch/arm64/boot/Image" ]; then
-            cp "${OUT}/arch/arm64/boot/Image" AnyKernel3/Image
-          else
-            echo "ERROR: No kernel boot Image found in ${OUT}/arch/arm64/boot/"; ls -la "${OUT}/arch/arm64/boot" || true; exit 1
-          fi
-
-          if [ -f "${OUT}/arch/arm64/boot/dtbo.img" ]; then
-            cp "${OUT}/arch/arm64/boot/dtbo.img" AnyKernel3/dtbo.img
-          fi
-
-          mkdir -p AnyKernel3/modules
-          if [ -d "${OUT}/lib/modules" ]; then
-            cp -r "${OUT}/lib/modules"/* AnyKernel3/modules/ || true
-          fi
-
-          cd AnyKernel3
-          zip -r ../mika_kernel_anykernel3.zip ./* || true
-          cd ..
-
-      - name: Upload artifacts (AnyKernel3 zip + boot images)
-        uses: actions/upload-artifact@v4
-        with:
-          name: mika-kernel-build-artifacts
-          path: |
-            mika_kernel_anykernel3.zip
-            kernel/oneplus/sm8550/out/arch/arm64/boot/Image
-            kernel/oneplus/sm8550/out/arch/arm64/boot/Image.gz
-            kernel/oneplus/sm8550/out/arch/arm64/boot/Image-dtb
-            kernel/oneplus/sm8550/out/arch/arm64/boot/Image.gz-dtb
-            kernel/oneplus/sm8550/out/arch/arm64/boot/dtbo.img
+    - name: Upload AnyKernel3 package
+      uses: actions/upload-artifact@v4
+      with:
+        name: OP12R-Kernel
+        path: AnyKernel3/*
